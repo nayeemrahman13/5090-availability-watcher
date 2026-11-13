@@ -130,23 +130,78 @@ def test_agent_is_cancelled_when_max_duration_passes():
     script = Scripted(
         [
             (200, {"run_id": "run_9", "error": None}),
-            (200, {"run_id": "run_9", "status": "RUNNING", "num_of_steps": 2, "result": None, "error": None}),
             (200, {"status": "CANCELLED"}),
             (200, {"run_id": "run_9", "status": "CANCELLED", "num_of_steps": 2, "result": None, "error": None}),
         ]
     )
-    settings = AgentSettings("stealth", "US", "tinyfish", 75, False)
+    settings = AgentSettings("stealth", "US", "tinyfish", 180, False)
     outcome = TinyFishClient("test-key", script).run_agent(
         "https://example.com",
         "read",
         settings,
         sleep=lambda _seconds: (_ for _ in ()).throw(AssertionError("should cancel before sleeping")),
-        monotonic=Clock([0, 1_000]).__call__,
-        poll_interval=0,
+        monotonic=Clock([0, 0, 180]).__call__,
+        poll_interval=2,
     )
     assert outcome.cancelled is True
     assert outcome.status == "CANCELLED"
     assert outcome.steps == 2
-    assert script.calls[2][0] == "POST"
-    assert script.calls[2][1].endswith("/v1/runs/run_9/cancel")
+    assert outcome.error == "Cancelled: max_duration_seconds elapsed"
+    assert script.calls[1][0] == "POST"
+    assert script.calls[1][1].endswith("/v1/runs/run_9/cancel")
     assert "mode" not in _body(script.calls[0])["agent_config"]
+    assert _body(script.calls[0])["agent_config"]["max_duration_seconds"] == 180
+
+
+def test_poll_deadline_matches_max_duration_with_no_grace_period():
+    """The 13 Nov pass cancelled at ~119s: deadline was cap+15, checked after a 30s GET.
+
+    At 20s remaining the poll timeout is 20, not 30. At 1s remaining the sleep
+    is 1, not the 2s poll interval. Crossing the cap cancels without another poll.
+    """
+
+    script = Scripted(
+        [
+            (200, {"run_id": "run_9", "error": None}),
+            (200, {"run_id": "run_9", "status": "RUNNING", "num_of_steps": None, "result": None, "error": None}),
+            (200, {"status": "CANCELLED"}),
+            (200, {"run_id": "run_9", "status": "CANCELLED", "num_of_steps": 6, "result": None, "error": None}),
+        ]
+    )
+    sleeps = []
+    settings = AgentSettings("stealth", "US", "tinyfish", 180, False)
+    outcome = TinyFishClient("test-key", script).run_agent(
+        "https://example.com",
+        "read",
+        settings,
+        sleep=sleeps.append,
+        monotonic=Clock([0, 0, 160, 179, 180]).__call__,
+        poll_interval=2,
+    )
+    assert script.calls[1][0] == "GET"
+    assert script.calls[1][4] == 20
+    assert sleeps == [1]
+    assert script.calls[2][0] == "POST"
+    assert script.calls[2][1].endswith("/cancel")
+    assert outcome.cancelled is True
+    assert outcome.steps == 6
+
+
+def test_strict_mode_off_does_not_send_mode_or_retry_a_403():
+    script = Scripted([(403, {"error": {"code": "FORBIDDEN", "message": "mode is in beta"}})])
+    settings = AgentSettings("stealth", "US", "tinyfish", 180, False)
+    try:
+        TinyFishClient("test-key", script).run_agent(
+            "https://example.com",
+            "read",
+            settings,
+            sleep=lambda _seconds: None,
+            monotonic=Clock([0]).__call__,
+        )
+    except Exception as exc:
+        assert getattr(exc, "status", None) == 403
+    else:
+        raise AssertionError("a 403 with strict mode off must not be retried")
+    assert len(script.calls) == 1
+    assert "mode" not in _body(script.calls[0])["agent_config"]
+    assert _body(script.calls[0])["agent_config"] == {"max_duration_seconds": 180}

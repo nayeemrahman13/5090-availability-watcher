@@ -12,13 +12,21 @@ Agent  POST https://agent.tinyfish.ai/v1/automation/run-async
 Auth for both is the X-API-Key header (https://docs.tinyfish.ai/authentication).
 
 /run is synchronous and cannot be cancelled, so a budget guard could not stop
-it. /run-async returns a run_id immediately. We poll, and we cancel when the
-wall clock passes max_duration_seconds.
+it. /run-async returns a run_id immediately. We poll until the run finishes
+or max_duration_seconds elapses, then cancel. That poll clock is the same
+number we send in agent_config, and it starts when the run_id arrives. A
+GET cannot be given a timeout past the time still left, so a slow poll
+cannot drag the cancel out past the cap. On 13 Nov 2026 the cap was 75s and
+the client waited 75+15s, then checked only after a GET with a 30s timeout.
+The four escalations came back "Cancelled: max_duration_seconds elapsed" at
+8 steps after about 119s, with no stock fields.
 
 `agent_config.mode = strict` and `max_steps` are beta and return 403 on
-accounts that have not joined. max_duration_seconds is generally available,
-so that is the cap we rely on. If a strict-mode request is forbidden, we
-retry the same goal once without mode. We never send max_steps.
+accounts that have not joined. This account got that 403 on every call, so
+prefer_strict_mode defaults off and we do not spend the round trip. When the
+option is on and the request is forbidden, we retry the same goal once
+without mode. We never send max_steps. max_duration_seconds is the cap we
+rely on.
 
 Stealth plus a US proxy is the combination that got a Best Buy reading on
 13 Nov 2026, after Fetch returned target_unreachable for that host.
@@ -139,26 +147,39 @@ class TinyFishClient:
             message = _error_message(parsed.get("error"))
             return AgentOutcome("FAILED", None, message, 0, _elapsed(monotonic, started), strict_mode_fallback=fallback)
         run_id = str(parsed["run_id"])
-        deadline = settings.max_duration_seconds + 15
+        # The server's cap starts once the run exists. The 403 retry, if we
+        # made one, is not part of that clock.
+        budget_started = monotonic()
+        limit = settings.max_duration_seconds
         while True:
-            run = self._get_run(run_id)
+            elapsed = monotonic() - budget_started
+            if elapsed >= limit:
+                return self._stop_for_duration(run_id, fallback, started, monotonic)
+            remaining = limit - elapsed
+            run = self._get_run(run_id, timeout=min(30, remaining))
             if run.get("status") in _TERMINAL:
                 return _outcome(run, fallback, _elapsed(monotonic, started))
-            if monotonic() - started >= deadline:
-                self._cancel(run_id)
-                final = self._get_run(run_id)
-                outcome = _outcome(final, fallback, _elapsed(monotonic, started))
-                status = outcome.status if outcome.status in _TERMINAL else "CANCELLED"
-                error = outcome.error or "Cancelled: max_duration_seconds elapsed"
-                return replace(outcome, cancelled=True, status=status, error=error)
-            sleep(poll_interval)
+            elapsed = monotonic() - budget_started
+            if elapsed >= limit:
+                return self._stop_for_duration(run_id, fallback, started, monotonic)
+            nap = min(poll_interval, limit - elapsed)
+            if nap > 0:
+                sleep(nap)
 
-    def _get_run(self, run_id: str) -> dict:
+    def _stop_for_duration(self, run_id: str, fallback: bool, started: float, monotonic: Callable[[], float]) -> AgentOutcome:
+        self._cancel(run_id)
+        final = self._get_run(run_id)
+        outcome = _outcome(final, fallback, _elapsed(monotonic, started))
+        status = outcome.status if outcome.status in _TERMINAL else "CANCELLED"
+        error = outcome.error or "Cancelled: max_duration_seconds elapsed"
+        return replace(outcome, cancelled=True, status=status, error=error)
+
+    def _get_run(self, run_id: str, timeout: float = 30) -> dict:
         status, parsed, text = self._json(
             "GET",
             f"{RUNS_URL}/{run_id}?screenshots=none&html=none",
             None,
-            timeout=30,
+            timeout=timeout,
         )
         if status != 200 or not isinstance(parsed, dict):
             raise TinyFishError(status, text)

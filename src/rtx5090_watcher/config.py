@@ -36,7 +36,7 @@ def load_config(path: Path) -> WatcherConfig:
         proxy_country=str(agent_raw.get("proxy_country", "US")),
         proxy_type=str(agent_raw.get("proxy_type", "tinyfish")),
         max_duration_seconds=int(agent_raw["max_duration_seconds"]),
-        prefer_strict_mode=bool(agent_raw.get("prefer_strict_mode", True)),
+        prefer_strict_mode=bool(agent_raw.get("prefer_strict_mode", False)),
     )
 
     seen: set[str] = set()

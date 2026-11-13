@@ -46,7 +46,12 @@ def main(argv: list[str] | None = None) -> int:
     estimate = sub.add_parser("estimate", help="Print the cost sketch. Does not call TinyFish.")
     _add_common(estimate)
     estimate.add_argument("--agent-targets", type=int, default=None, help="How many targets escalate. Default: every target whose tier can use the Agent, minus one Fetch success.")
-    estimate.add_argument("--steps", type=int, default=4, help="Observed Agent steps per escalated target. Best Buy FE was 4 on 13 Nov 2026.")
+    estimate.add_argument(
+        "--steps",
+        type=int,
+        default=4,
+        help="Agent steps per finished escalation. A manual Best Buy FE read was 4 on 13 Nov 2026. That day's watcher pass was cancelled at 8.",
+    )
 
     args = parser.parse_args(argv)
     try:
@@ -182,13 +187,22 @@ def render_estimate(config, agent_targets: int | None, steps: int) -> str:
 
     calls = count_calls_until_day_cap(factory, agent_targets, steps) if agent_targets else 0
     capped = scenario_agent_micros(calls, steps)
+    cancelled_each = scenario_agent_micros(1, 8)
     return "\n".join(
         [
             f"schedule: every 10 minutes ({RUNS_PER_DAY_EVERY_10_MIN} runs/day)",
             f"targets: {fetch_targets} Fetch URLs/run, {agent_targets} of them assumed to escalate",
-            f"assumed Agent steps when a run actually happens: {steps}",
+            "observed 13 Nov 2026 Fetch: Newegg in-stock search returned 13 graphics cards, cheapest $6,709.99",
+            "observed 13 Nov 2026 Agent: bestbuy-fe, nvidia-marketplace, bestbuy-astral, and bh-pny-5090 each ended "
+            f"Cancelled: max_duration_seconds elapsed at 8 steps after about 119s ({format_micros(cancelled_each)} each) "
+            "and returned no stock data",
+            "observed 13 Nov 2026: mode=strict returned HTTP 403 (beta) on every Agent call, so prefer_strict_mode defaults off",
+            "observed 13 Nov 2026 manual Best Buy FE run: 4 steps, about $0.0640, $1,999.99, Out of Stock",
+            f"assumed Agent steps when a run actually finishes: {steps}",
             f"reservation before each Agent run: {config.budgets.assumed_agent_steps} steps "
             f"({format_micros(config.budgets.assumed_agent_steps * 16_000)})",
+            f"agent max_duration_seconds: {config.agent.max_duration_seconds} "
+            f"(poll deadline is the same value; prefer_strict_mode={str(config.agent.prefer_strict_mode).lower()})",
             f"Fetch URLs/day: {urls} (free allowance is 1,000/day, published price $0.0000)",
             f"Fetch cost/day inside the allowance: {format_micros(0)}",
             f"Agent cost per run if each escalation takes {steps} steps: {format_micros(per_run)}",

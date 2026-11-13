@@ -51,10 +51,13 @@ def agent_cost_micros(steps: int) -> int:
 class BudgetGuard:
     """Per-run and per-day caps on Agent spend.
 
-    Before a run starts we reserve `assumed_steps` (the run might cost that
-    much). After it finishes we charge the real `num_of_steps`. Reserving the
-    pessimistic number is what keeps one bad page from walking off with the
-    day's wallet. Fetch is not charged: the published price inside the daily
+    Before a run starts we hold `assumed_steps` (the run might cost that
+    much). Concurrent runs each hold that reservation before any of them
+    starts, so a wave cannot be admitted for more than the caps allow. When
+    a run finishes, charge() drops one hold and adds the real `num_of_steps`.
+    The number stored for the day is the charge, not the hold. A caller that
+    never holds (the daily estimate) is unchanged: charge() just adds the
+    actual cost. Fetch is not charged: the published price inside the daily
     allowance is $0.
     """
 
@@ -72,21 +75,35 @@ class BudgetGuard:
         self.assumed_steps = assumed_steps
         self.today_micros = already_spent_today
         self.run_micros = 0
+        self.held_micros = 0
 
     def reservation_micros(self) -> int:
         return agent_cost_micros(self.assumed_steps)
 
     def allow(self) -> tuple[bool, str]:
         reservation = self.reservation_micros()
-        if self.run_micros + reservation > self.per_run_micros:
+        if self.run_micros + self.held_micros + reservation > self.per_run_micros:
             return False, "per-run"
-        if self.today_micros + reservation > self.per_day_micros:
+        if self.today_micros + self.held_micros + reservation > self.per_day_micros:
             return False, "per-day"
         return True, ""
+
+    def hold(self) -> int:
+        """Call only after allow() returned True. Holds one pessimistic reservation."""
+
+        micros = self.reservation_micros()
+        self.held_micros += micros
+        return micros
+
+    def release_hold(self) -> None:
+        """Drop one hold when a run produced no step count to charge."""
+
+        self.held_micros -= min(self.held_micros, self.reservation_micros())
 
     def charge(self, steps: int | None) -> int:
         used = self.assumed_steps if steps is None else steps
         micros = agent_cost_micros(used)
+        self.held_micros -= min(self.held_micros, self.reservation_micros())
         self.run_micros += micros
         self.today_micros += micros
         return micros
