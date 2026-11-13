@@ -2,7 +2,7 @@
 
 A stock checker for the NVIDIA GeForce RTX 5090. It pages Nayeem only when a watched card becomes buyable at or under **$2,500**. Founders Edition MSRP is $1,999.99. A partner card that is merely "in stock" at $6,500 does not alert.
 
-The code is a walk through [TinyFish](https://tinyfish.ai): which layer reads a page, which layer is a browser, and what each one costs. The scheduled run lives on GitHub:
+The code is a walk through [TinyFish](https://tinyfish.ai): which layer reads a page, which layer is a browser, and what each one costs. A manual run lives on GitHub. The 10-minute cron in the workflow is commented out until you uncomment it:
 
 https://github.com/nayeemrahman13/5090-availability-watcher
 
@@ -45,9 +45,11 @@ Copy `.env.example` to `.env` and export it yourself. The process does not read 
 
 ## GitHub Actions
 
-`.github/workflows/watch.yml` is the schedule: cron `*/10 * * * *`, plus **Run workflow** in the Actions tab. Pushes to `main` run the unit tests and do not call TinyFish.
+`.github/workflows/watch.yml` does not run on a timer yet. The `schedule` block (`cron: "*/10 * * * *"`) is commented out, so a merge to `main` does not start stock checks. **Run workflow** in the Actions tab still runs one check. Pushes to `main` run the unit tests and do not call TinyFish.
 
-The job restores and saves `state/` with `actions/cache`, so the last reading and the day's Agent spend survive between runs. A second run waits on the `rtx5090-watch` concurrency group instead of racing the state file. GitHub sometimes starts a 10-minute cron late. The daily budget still caps spend if several runs queue up.
+To turn the timer on, uncomment those two lines in the workflow. The watch job already runs when the event is `schedule`, so that is the only edit. Once it is on, GitHub sometimes starts a 10-minute cron late. The daily budget still caps spend if several runs queue up.
+
+The job restores and saves `state/` with `actions/cache`, so the last reading and the day's Agent spend survive between runs. A second run waits on the `rtx5090-watch` concurrency group instead of racing the state file.
 
 Add these repository secrets (Settings → Secrets and variables → Actions). The workflow will not check stock until both exist:
 
@@ -171,5 +173,5 @@ src/rtx5090_watcher/
   pricing.py                  published rates and the budget guard
   cli.py                      run-once, demo-alert, estimate
 tests/
-.github/workflows/watch.yml   cron and the Actions secrets
+.github/workflows/watch.yml   manual run; the */10 cron is commented out
 ```
