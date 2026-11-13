@@ -1,0 +1,71 @@
+{
+  "defaults": {
+    "max_price_usd": 2500,
+    "tier": "fetch-then-agent"
+  },
+  "budgets": {
+    "agent_per_run_usd": 0.6,
+    "agent_per_day_usd": 2.0,
+    "assumed_agent_steps": 8
+  },
+  "agent": {
+    "browser_profile": "stealth",
+    "proxy_country": "US",
+    "proxy_type": "tinyfish",
+    "max_duration_seconds": 75,
+    "prefer_strict_mode": true
+  },
+  "targets": [
+    {
+      "id": "bestbuy-fe",
+      "retailer": "Best Buy",
+      "product_name": "NVIDIA GeForce RTX 5090 Founders Edition",
+      "url": "https://www.bestbuy.com/product/nvidia-geforce-rtx-5090-founders-edition-32gb-gddr7-pci-express-5-0-graphics-card-dark-gun-metal/J3GWYHGPCP",
+      "page_kind": "product",
+      "tier": "fetch-then-agent",
+      "max_price_usd": 2500,
+      "notes": "Founders Edition, MSRP $1,999.99. On 13 Nov 2026 Fetch failed with target_unreachable. The Agent with stealth and a US proxy returned price $1,999.99, button Out of Stock, in_stock false, in about 4 steps."
+    },
+    {
+      "id": "nvidia-marketplace",
+      "retailer": "NVIDIA Marketplace",
+      "product_name": "NVIDIA GeForce RTX 5090",
+      "url": "https://marketplace.nvidia.com/en-us/consumer/graphics-cards/?gpu=RTX%205090",
+      "page_kind": "search",
+      "tier": "fetch-then-agent",
+      "max_price_usd": 2500,
+      "notes": "Official marketplace. On 13 Nov 2026 Fetch returned bot_blocked. Escalates to the Agent, which picks the cheapest in-stock card rather than a full PC."
+    },
+    {
+      "id": "bestbuy-astral",
+      "retailer": "Best Buy",
+      "product_name": "ASUS ROG Astral GeForce RTX 5090",
+      "url": "https://www.bestbuy.com/product/asus-rog-astral-nvidia-geforce-rtx-5090-32gb-gddr7-pci-express-5-0-graphics-card-black/JJGGLHJVSV",
+      "page_kind": "product",
+      "tier": "fetch-then-agent",
+      "max_price_usd": 2500,
+      "notes": "Partner card on Best Buy. Same host as the Founders Edition page, so Fetch is expected to fail closed and the Agent is the layer that can read the button."
+    },
+    {
+      "id": "bh-pny-5090",
+      "retailer": "B&H",
+      "product_name": "PNY GeForce RTX 5090 OC Triple Fan",
+      "url": "https://www.bhphotovideo.com/c/product/1874647-REG/pny_vcg509032tfxpb1_o_nvidia_geforce_rtx_5090.html",
+      "page_kind": "product",
+      "tier": "fetch-then-agent",
+      "max_price_usd": 2500,
+      "notes": "On 13 Nov 2026 Fetch returned bot_blocked for this B&H product URL. A partner card, not the Founders Edition, so it alerts only if the price is at or under $2,500."
+    },
+    {
+      "id": "newegg-instock",
+      "retailer": "Newegg",
+      "product_name": "GeForce RTX 5090",
+      "url": "https://www.newegg.com/p/pl?d=rtx+5090&N=4131",
+      "page_kind": "search",
+      "in_stock_filter": true,
+      "tier": "fetch-then-agent",
+      "max_price_usd": 2500,
+      "notes": "N=4131 is Newegg's In Stock filter. On 13 Nov 2026 Fetch returned the page. Partner cards were roughly $6,500 to $10,000, mixed with whole PCs. The parser keeps graphics cards and ignores desktops, so this target should stop at Fetch. The Agent is only there if the markup changes and stock can no longer be read."
+    }
+  ]
+}

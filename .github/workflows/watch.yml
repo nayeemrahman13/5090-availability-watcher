@@ -1,0 +1,66 @@
+# Primary schedule for the watcher. The repo home is
+# https://github.com/nayeemrahman13/5090-availability-watcher
+#
+# Add these Actions secrets (Settings → Secrets and variables → Actions):
+#   TINYFISH_API_KEY   key from https://agent.tinyfish.ai/api-keys
+#   NTFY_TOPIC         ntfy.sh topic. No account. The topic is the secret.
+#
+# State is restored and saved with actions/cache so a transition is remembered
+# across runs. GitHub may start a */10 cron late; the per-day Agent budget
+# still caps spend if runs pile up.
+
+name: RTX 5090 stock
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: rtx5090-watch
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  test:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Unit tests
+        run: pip install pytest && PYTHONPATH=src pytest
+
+  watch:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Restore last-known stock and the day budget
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: rtx5090-state-${{ github.run_id }}
+          restore-keys: |
+            rtx5090-state-
+      - name: Check stock once
+        env:
+          TINYFISH_API_KEY: ${{ secrets.TINYFISH_API_KEY }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: PYTHONPATH=src python -m rtx5090_watcher run-once
+      - name: Save stock state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: rtx5090-state-${{ github.run_id }}
