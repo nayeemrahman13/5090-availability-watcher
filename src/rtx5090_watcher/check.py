@@ -1,17 +1,26 @@
 """One pass over the targets.
 
 Fetch is a batch: one POST, up to ten URLs, which is the Fetch API's unit.
-Agent runs are serial. Pay-as-you-go allows two concurrent Agent runs, and
-serial is what lets the budget guard see each charge before the next start.
+Agent runs that the budget has already reserved start together. They are
+async (/run-async returns a run_id, then we poll), so one pass waits out the
+slowest run in a wave instead of the sum. Pay-as-you-go queues past the
+account's concurrency. The guard does not depend on that queue: each run
+holds an assumed-step reservation before it starts, and charge() replaces
+that hold with the real num_of_steps. A target that does not fit is tried
+again after the wave settles, which is the same admission rule as checking
+the budget before every start.
 """
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from rtx5090_watcher.decide import is_qualifying, needs_agent, should_alert
 from rtx5090_watcher.goals import stock_goal
 from rtx5090_watcher.models import (
+    AgentOutcome,
     CheckResult,
     FetchPage,
     Observation,
@@ -25,6 +34,15 @@ from rtx5090_watcher.pricing import BudgetGuard, format_micros, format_price_cen
 from rtx5090_watcher.state import StateStore, utc_day
 
 
+@dataclass
+class _Prepared:
+    target: Target
+    fetch_error: str | None
+    latency_ms: int
+    observation: Observation
+    needs_agent: bool
+
+
 def run_once(config: WatcherConfig, client, notifier, store: StateStore, now: datetime, only: list[str] | None = None) -> list[CheckResult]:
     targets = _select(config, only)
     fetch_urls = [target.url for target in targets if target.tier != "agent"]
@@ -36,83 +54,56 @@ def run_once(config: WatcherConfig, client, notifier, store: StateStore, now: da
         config.budgets.assumed_agent_steps,
         store.spent_today(day),
     )
+    prepared = [_prepare(target, pages.get(target.url)) for target in targets]
+    outcomes: dict[str, AgentOutcome] = {}
+    costs: dict[str, int] = {}
+    skipped: dict[str, str] = {}
+    pending = [item for item in prepared if item.needs_agent]
+    while pending:
+        wave: list[_Prepared] = []
+        rest: list[_Prepared] = []
+        blocked = ""
+        for index, item in enumerate(pending):
+            ok, which = guard.allow()
+            if not ok:
+                blocked = which
+                rest = list(pending[index:])
+                break
+            guard.hold()
+            wave.append(item)
+        if not wave:
+            for item in pending:
+                skipped[item.target.id] = blocked
+            break
+        wave_outcomes, errors = _run_wave(client, wave, config.agent)
+        for item in wave:
+            outcome = wave_outcomes.get(item.target.id)
+            if outcome is None:
+                guard.release_hold()
+                continue
+            costs[item.target.id] = guard.charge(outcome.steps)
+            outcomes[item.target.id] = outcome
+        _save_budget(store, guard, day)
+        if errors:
+            raise errors[0]
+        pending = rest
+
     results = []
-    for target in targets:
-        result = check_target(target, pages.get(target.url), client, config, guard, notifier, store, now)
-        store.budget_day = day
-        store.budget_micros = guard.today_micros
-        store.save()
+    for item in prepared:
+        result = _finish(
+            item,
+            outcomes.get(item.target.id),
+            costs.get(item.target.id, 0),
+            skipped.get(item.target.id),
+            config,
+            guard,
+            notifier,
+            store,
+            now,
+        )
+        _save_budget(store, guard, day)
         results.append(result)
     return results
-
-
-def check_target(target, page, client, config: WatcherConfig, guard: BudgetGuard, notifier, store: StateStore, now: datetime) -> CheckResult:
-    fetch_error = None
-    latency = 0
-    cost = 0
-    steps = None
-    escalated = False
-    tier = "fetch"
-
-    if target.tier == "agent":
-        obs = Observation(False, None, None, target.product_name, None, "Tier is agent; Fetch skipped", 0)
-    else:
-        if page is None:
-            page = FetchPage(target.url, None, "missing", None)
-        fetch_error = page.error
-        latency = page.latency_ms or 0
-        if page.error or not page.text:
-            obs = Observation(False, None, None, target.product_name, None, f"Fetch {page.error}", 0)
-        else:
-            obs = parse_fetch_text(page.text, target)
-
-    if needs_agent(target, fetch_error, obs):
-        allowed, which = guard.allow()
-        if not allowed:
-            reservation = format_micros(guard.reservation_micros())
-            obs = Observation(
-                obs.determined,
-                obs.in_stock,
-                obs.price_cents,
-                obs.product,
-                obs.listing_url,
-                f"{obs.detail}. Agent skipped: {reservation} reservation would exceed the {which} budget",
-                obs.listings,
-            )
-            tier = "fetch" if target.tier != "agent" else "skipped"
-        else:
-            escalated = True
-            tier = "agent"
-            outcome = client.run_agent(target.url, stock_goal(target), config.agent)
-            charged = guard.charge(outcome.steps)
-            cost += charged
-            steps = outcome.steps if outcome.steps is not None else config.budgets.assumed_agent_steps
-            latency += outcome.latency_ms
-            obs = parse_agent_result(outcome.result, outcome.error, outcome.status)
-            if outcome.strict_mode_fallback:
-                obs = Observation(
-                    obs.determined,
-                    obs.in_stock,
-                    obs.price_cents,
-                    obs.product,
-                    obs.listing_url,
-                    f"{obs.detail}. strict mode is beta on this account; retried without mode",
-                    obs.listings,
-                )
-            if outcome.cancelled:
-                obs = Observation(
-                    obs.determined,
-                    obs.in_stock,
-                    obs.price_cents,
-                    obs.product,
-                    obs.listing_url,
-                    f"{obs.detail}. Agent cancelled at max_duration_seconds",
-                    obs.listings,
-                )
-    elif target.tier == "fetch" and fetch_error in {"bot_blocked", "target_unreachable", "timeout"}:
-        tier = "fetch"
-
-    return _record(target, obs, notifier, store, now, tier, cost, latency or None, steps, fetch_error, escalated)
 
 
 def demo_transition(target: Target, store: StateStore, notifier, now: datetime) -> CheckResult:
@@ -146,6 +137,99 @@ def demo_transition(target: Target, store: StateStore, notifier, now: datetime) 
     result = _record(target, observation, notifier, store, now, "demo", 0, None, None, None, False)
     store.save()
     return result
+
+
+def _prepare(target: Target, page: FetchPage | None) -> _Prepared:
+    if target.tier == "agent":
+        observation = Observation(False, None, None, target.product_name, None, "Tier is agent; Fetch skipped", 0)
+        return _Prepared(target, None, 0, observation, True)
+    if page is None:
+        page = FetchPage(target.url, None, "missing", None)
+    latency = page.latency_ms or 0
+    if page.error or not page.text:
+        observation = Observation(False, None, None, target.product_name, None, f"Fetch {page.error}", 0)
+    else:
+        observation = parse_fetch_text(page.text, target)
+    return _Prepared(target, page.error, latency, observation, needs_agent(target, page.error, observation))
+
+
+def _run_wave(client, wave: list[_Prepared], settings) -> tuple[dict[str, AgentOutcome], list[Exception]]:
+    if len(wave) == 1:
+        item = wave[0]
+        try:
+            outcome = client.run_agent(item.target.url, stock_goal(item.target), settings)
+        except Exception as exc:
+            return {}, [exc]
+        return {item.target.id: outcome}, []
+
+    outcomes: dict[str, AgentOutcome] = {}
+    errors: list[Exception] = []
+    with ThreadPoolExecutor(max_workers=len(wave)) as pool:
+        futures = {
+            pool.submit(client.run_agent, item.target.url, stock_goal(item.target), settings): item.target.id
+            for item in wave
+        }
+        for future in as_completed(futures):
+            target_id = futures[future]
+            try:
+                outcomes[target_id] = future.result()
+            except Exception as exc:
+                errors.append(exc)
+    return outcomes, errors
+
+
+def _finish(item, outcome, cost, skipped, config, guard, notifier, store, now) -> CheckResult:
+    target = item.target
+    obs = item.observation
+    latency = item.latency_ms
+    steps = None
+    escalated = False
+    tier = "fetch"
+    if outcome is not None:
+        escalated = True
+        tier = "agent"
+        steps = outcome.steps if outcome.steps is not None else config.budgets.assumed_agent_steps
+        latency += outcome.latency_ms
+        obs = parse_agent_result(outcome.result, outcome.error, outcome.status)
+        if outcome.strict_mode_fallback:
+            obs = Observation(
+                obs.determined,
+                obs.in_stock,
+                obs.price_cents,
+                obs.product,
+                obs.listing_url,
+                f"{obs.detail}. strict mode is beta on this account; retried without mode",
+                obs.listings,
+            )
+        if outcome.cancelled:
+            obs = Observation(
+                obs.determined,
+                obs.in_stock,
+                obs.price_cents,
+                obs.product,
+                obs.listing_url,
+                f"{obs.detail}. Agent cancelled at max_duration_seconds",
+                obs.listings,
+            )
+    elif skipped:
+        reservation = format_micros(guard.reservation_micros())
+        obs = Observation(
+            obs.determined,
+            obs.in_stock,
+            obs.price_cents,
+            obs.product,
+            obs.listing_url,
+            f"{obs.detail}. Agent skipped: {reservation} reservation would exceed the {skipped} budget",
+            obs.listings,
+        )
+        tier = "fetch" if target.tier != "agent" else "skipped"
+    return _record(target, obs, notifier, store, now, tier, cost, latency or None, steps, item.fetch_error, escalated)
+
+
+def _save_budget(store: StateStore, guard: BudgetGuard, day: str) -> None:
+    store.budget_day = day
+    store.budget_micros = guard.today_micros
+    store.save()
 
 
 def _record(target, obs: Observation, notifier, store: StateStore, now: datetime, tier: str, cost: int, latency, steps, fetch_error, escalated: bool) -> CheckResult:

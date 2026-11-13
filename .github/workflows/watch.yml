@@ -1,19 +1,26 @@
-# Primary schedule for the watcher. The repo home is
+# Manual stock check, plus tests on push to main. The repo home is
 # https://github.com/nayeemrahman13/5090-availability-watcher
+#
+# The */10 cron is commented out so merging to main does not start calling
+# TinyFish. Run a check from the Actions tab (Run workflow). To turn the
+# schedule back on, uncomment the schedule block under `on:`. The watch job
+# already runs when github.event_name is schedule, so that is the only edit.
 #
 # Add these Actions secrets (Settings → Secrets and variables → Actions):
 #   TINYFISH_API_KEY   key from https://agent.tinyfish.ai/api-keys
 #   NTFY_TOPIC         ntfy.sh topic. No account. The topic is the secret.
 #
 # State is restored and saved with actions/cache so a transition is remembered
-# across runs. GitHub may start a */10 cron late; the per-day Agent budget
-# still caps spend if runs pile up.
+# across runs. A second run waits on the concurrency group below. Once the
+# cron is uncommented, GitHub may start a */10 run late; the per-day Agent
+# budget still caps spend if runs pile up.
 
 name: RTX 5090 stock
 
 on:
-  schedule:
-    - cron: "*/10 * * * *"
+  # Schedule is off. Uncomment the next two lines to check every 10 minutes:
+  # schedule:
+  #   - cron: "*/10 * * * *"
   workflow_dispatch:
   push:
     branches: [main]

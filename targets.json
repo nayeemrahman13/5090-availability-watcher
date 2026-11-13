@@ -12,8 +12,8 @@
     "browser_profile": "stealth",
     "proxy_country": "US",
     "proxy_type": "tinyfish",
-    "max_duration_seconds": 75,
-    "prefer_strict_mode": true
+    "max_duration_seconds": 180,
+    "prefer_strict_mode": false
   },
   "targets": [
     {
@@ -24,7 +24,7 @@
       "page_kind": "product",
       "tier": "fetch-then-agent",
       "max_price_usd": 2500,
-      "notes": "Founders Edition, MSRP $1,999.99. On 13 Nov 2026 Fetch failed with target_unreachable. The Agent with stealth and a US proxy returned price $1,999.99, button Out of Stock, in_stock false, in about 4 steps."
+      "notes": "Founders Edition, MSRP $1,999.99. On 13 Nov 2026 Fetch failed with target_unreachable. A manual Agent run with stealth, a US proxy, and output_schema returned $1,999.99, button Out of Stock, in about 4 steps. The same day's watcher pass cancelled this target at 8 steps after about 119s because the 75s cap and a wandering goal never let it stop."
     },
     {
       "id": "nvidia-marketplace",
@@ -34,7 +34,7 @@
       "page_kind": "search",
       "tier": "fetch-then-agent",
       "max_price_usd": 2500,
-      "notes": "Official marketplace. On 13 Nov 2026 Fetch returned bot_blocked. Escalates to the Agent, which picks the cheapest in-stock card rather than a full PC."
+      "notes": "Official marketplace. On 13 Nov 2026 Fetch returned bot_blocked. Escalates to the Agent, which reads the cheapest in-stock card already visible on this page and does not open another URL. The same day's watcher pass cancelled here at 8 steps after about 119s with no stock data."
     },
     {
       "id": "bestbuy-astral",
@@ -65,7 +65,7 @@
       "in_stock_filter": true,
       "tier": "fetch-then-agent",
       "max_price_usd": 2500,
-      "notes": "N=4131 is Newegg's In Stock filter. On 13 Nov 2026 Fetch returned the page. Partner cards were roughly $6,500 to $10,000, mixed with whole PCs. The parser keeps graphics cards and ignores desktops, so this target should stop at Fetch. The Agent is only there if the markup changes and stock can no longer be read."
+      "notes": "N=4131 is Newegg's In Stock filter. On 13 Nov 2026 Fetch returned the page: 13 graphics cards in stock, cheapest $6,709.99, mixed with whole PCs. The parser keeps graphics cards and ignores desktops, so this target stops at Fetch and does not alert (the cheapest card is over $2,500). The Agent is only there if the markup changes and stock can no longer be read."
     }
   ]
 }

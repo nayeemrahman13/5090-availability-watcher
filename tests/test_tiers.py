@@ -1,8 +1,11 @@
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from rtx5090_watcher.check import run_once
 from rtx5090_watcher.decide import needs_agent
+from rtx5090_watcher.goals import stock_goal
 from rtx5090_watcher.models import Observation
 from rtx5090_watcher.state import StateStore
 from tests.support import FakeClient, MemoryNotifier, agent_result, make_config, make_target, page
@@ -61,6 +64,24 @@ def test_bot_block_escalates_and_the_goal_is_read_only(tmp_path: Path):
     assert "Do not click Add to Cart" in goal
     assert "Sign in" in goal
     assert "Do not type into any form" in goal
+    assert "stop immediately" in goal
+    assert "Do not navigate" in goal
+    assert "Do not search" in goal
+    assert "Do not open the cart" in goal
+    assert "listing_url: null" in goal
+
+
+def test_goal_reads_the_current_page_and_stops():
+    product = stock_goal(make_target())
+    search = stock_goal(make_target(id="nvidia-marketplace", page_kind="search", url="https://nvidia.example/5090"))
+    assert "product page" in product
+    assert "search or marketplace page" in search
+    assert "cheapest RTX 5090 graphics card visible on this page" in search
+    for goal in (product, search):
+        assert "Do not navigate" in goal
+        assert "Do not search" in goal
+        assert "Do not open the cart" in goal
+        assert "Stop as soon as those fields are filled" in goal
 
 
 def test_undetermined_fetch_text_escalates(tmp_path: Path):
@@ -161,3 +182,83 @@ def test_per_day_budget_persists_and_blocks_the_next_run(tmp_path: Path):
     assert later.agent_urls == []
     assert second[0].escalated is False
     assert "per-day budget" in second[0].detail
+
+
+class _OverlapClient(FakeClient):
+    """Holds each agent call briefly so overlapping starts are visible."""
+
+    def __init__(self, pages, agents, dwell: float = 0.1) -> None:
+        super().__init__(pages, agents)
+        self.dwell = dwell
+        self.max_in_flight = 0
+        self._in_flight = 0
+        self._lock = threading.Lock()
+
+    def run_agent(self, url, goal, settings):
+        with self._lock:
+            self._in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self._in_flight)
+        try:
+            time.sleep(self.dwell)
+        finally:
+            with self._lock:
+                self._in_flight -= 1
+        return super().run_agent(url, goal, settings)
+
+
+def test_reserved_escalations_run_in_one_wave(tmp_path: Path):
+    targets = [make_target(id=f"card-{index}", url=f"https://example.com/{index}") for index in range(4)]
+    pages = {target.url: page(target.url, error="bot_blocked") for target in targets}
+    agents = {target.url: agent_result(False, "$1,999.99", steps=4) for target in targets}
+    client = _OverlapClient(pages, agents)
+    # 4 reservations of $0.128 fit in the $0.60 per-run budget ($0.512).
+    config = make_config(targets, per_run=600_000, per_day=2_000_000, assumed=8)
+    path = tmp_path / "s.json"
+    results = run_once(config, client, MemoryNotifier(), StateStore(path), NOW)
+    assert client.max_in_flight == 4
+    assert sorted(client.agent_urls) == sorted(target.url for target in targets)
+    assert [result.escalated for result in results] == [True, True, True, True]
+    assert [result.estimated_cost_micros for result in results] == [64_000, 64_000, 64_000, 64_000]
+    assert StateStore(path).spent_today("2026-11-13") == 256_000
+
+
+def test_day_budget_caps_the_wave_and_does_not_start_the_rest(tmp_path: Path):
+    targets = [make_target(id=f"card-{index}", url=f"https://example.com/{index}") for index in range(4)]
+    pages = {target.url: page(target.url, error="bot_blocked") for target in targets}
+    agents = {target.url: agent_result(False, "$1,999.99", steps=8) for target in targets}
+    client = _OverlapClient(pages, agents)
+    # Two 8-step reservations are $0.256, which is the whole day budget.
+    # Actual steps equal the reservation, so a later wave still does not fit.
+    config = make_config(targets, per_run=2_000_000, per_day=256_000, assumed=8)
+    results = run_once(config, client, MemoryNotifier(), StateStore(tmp_path / "s.json"), NOW)
+    assert client.max_in_flight == 2
+    assert len(client.agent_urls) == 2
+    escalated = [result for result in results if result.escalated]
+    skipped = [result for result in results if not result.escalated]
+    assert len(escalated) == 2
+    assert len(skipped) == 2
+    assert all("per-day budget" in result.detail for result in skipped)
+    assert sum(result.estimated_cost_micros for result in results) == 256_000
+
+
+def test_second_wave_starts_only_after_the_first_charge_frees_budget(tmp_path: Path):
+    first = make_target(id="bestbuy-fe", url="https://bestbuy.example/fe")
+    second = make_target(id="nvidia-marketplace", url="https://nvidia.example/5090")
+    pages = {
+        first.url: page(first.url, error="bot_blocked"),
+        second.url: page(second.url, error="bot_blocked"),
+    }
+    agents = {
+        first.url: agent_result(False, "$1,999.99", steps=4),
+        second.url: agent_result(False, "$2,199.99", steps=4),
+    }
+    client = _OverlapClient(pages, agents)
+    # One reservation is $0.128. Two holds ($0.256) do not fit in $0.200.
+    # After a 4-step charge ($0.064) the second reservation does: $0.192.
+    config = make_config([first, second], per_run=200_000, per_day=2_000_000, assumed=8)
+    results = run_once(config, client, MemoryNotifier(), StateStore(tmp_path / "s.json"), NOW)
+    assert client.max_in_flight == 1
+    assert client.agent_urls == [first.url, second.url]
+    assert [result.escalated for result in results] == [True, True]
+    assert [result.estimated_cost_micros for result in results] == [64_000, 64_000]
+    assert results[1].price_cents == 219_999

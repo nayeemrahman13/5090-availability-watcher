@@ -26,6 +26,8 @@ def test_shipped_targets_match_the_pages_checked_on_nov_13():
     assert all(target.tier == "fetch-then-agent" for target in config.targets)
     assert config.agent.browser_profile == "stealth"
     assert config.agent.proxy_country == "US"
+    assert config.agent.max_duration_seconds == 180
+    assert config.agent.prefer_strict_mode is False
     assert config.budgets.per_run_micros == 600_000
     assert config.budgets.per_day_micros == 2_000_000
     assert config.budgets.assumed_agent_steps == 8
@@ -54,3 +56,34 @@ def test_estimate_text_quotes_the_same_numbers():
     assert "$36.8640" in text
     assert "Agent calls before the day budget stops escalation: 30" in text
     assert "$1.9200" in text  # 30 * 4 * $0.016
+    assert "13 graphics cards, cheapest $6,709.99" in text
+    assert "about 119s ($0.1280 each)" in text
+    assert "returned no stock data" in text
+    assert "HTTP 403" in text
+    assert "prefer_strict_mode=false" in text
+    assert "agent max_duration_seconds: 180" in text
+
+
+def test_prefer_strict_mode_defaults_off_when_the_key_is_omitted(tmp_path: Path):
+    import json
+
+    raw = json.loads(Path("targets.json").read_text(encoding="utf-8"))
+    del raw["agent"]["prefer_strict_mode"]
+    path = tmp_path / "targets.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    assert load_config(path).agent.prefer_strict_mode is False
+
+
+def test_a_hold_blocks_the_next_reservation_until_the_real_charge():
+    guard = BudgetGuard(200_000, 2_000_000, assumed_steps=8)
+    assert guard.allow() == (True, "")
+    assert guard.hold() == 128_000
+    assert guard.today_micros == 0
+    assert guard.run_micros == 0
+    ok, which = guard.allow()
+    assert ok is False
+    assert which == "per-run"
+    assert guard.charge(4) == 64_000
+    assert guard.held_micros == 0
+    assert guard.today_micros == 64_000
+    assert guard.allow() == (True, "")
